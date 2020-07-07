@@ -1,0 +1,958 @@
+---
+title: "STAT-225 (Nonparametric Statistics) Project Report"
+subtitle: "Predicting Diamond Price" 
+author: "Group 8: Nicole Frontero, Anna Ballou, Alex Russell"
+date: "April 22, 2020"
+output: 
+  pdf_document:
+  html_document:
+    fig_height: 3
+    fig_width: 5
+  word_document:
+    fig_height: 3
+    fig_width: 5
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1)
+library(GGally)
+library(tidyverse)
+library(olsrr)
+library(Rfit)
+library(stats)
+library(gam)
+library(gridExtra)
+library(kableExtra)
+```
+
+# Introduction and Exploratory Analyses 
+
+We aim to identify the best metric for predicting the price of a diamond.  Diamonds vary in many ways from one another, for example, in various measurements of size, as well as in color and cut quality. Our question of interest is: Are certain qualities of diamonds better predictors for diamond price? In other words, are certain characteristics of diamonds more strongly associated with the price of a diamond than others?  
+
+The data is from the `diamonds` dataset from the `ggplot2` package in R.  The data can be found on the official `ggplot2` webpage.\footnote{https://github.com/tidyverse/ggplot2/blob/master/data-raw/diamonds.csv}  This dataset contains the prices and other attributes of nearly 54,000 diamonds. Each observation in this dataset represents a unique diamond. We randomly sampled 500 observations from the overall dataset. 
+```{r, include = F}
+data(diamonds)
+```
+
+```{r, include = F}
+set.seed(122)
+data <- diamonds[sample(dim(diamonds)[1], 500), ]
+head(data)
+```
+
+The observational units in our dataset are diamonds.  Since we took a random sample from the larger dataset (`diamonds`), we would expect that our data is representative of the approximately 54,000 diamonds in `diamonds`.  We are assuming that the observations in `diamonds` are representative of the world diamond population. 
+
+Below is brief introduction to our data:
+
+* The response variable is price in US dollars, which ranges between \$326 - \$18,823.
+
+* The explanatory variables are as follows:
+
+  - Carat: measure of mass (weight) of the diamond.  Ranges between (0.2ct - 5.01ct).  Note that 1 ct = 200 mg.
+
+  - length: length in mm.  Ranges between (0mm - 58.9mm).
+
+  - width: width in mm.  Ranges between (0mm - 58.9mm).
+
+  - depth: depth in mm.  Ranges between (0mm - 31.8mm).
+
+  - depth: total depth percentage, which is calculated as $\frac{z}{\text{mean}(x,y)} = \frac{2z}{x+y}$, and ranges from 43% - 79%.
+
+  - table: the width of the top of the diamond relative to the widest point in mm.  Ranges between 43mm - 95mm.
+
+  - cut: quality of the cut. Includes fair, good, very good, premium and ideal. 
+
+  - clarity: a measurment of how clear the diamond is. Ranges between "I1" (worst) to "IF" (best).
+
+  - color: diamond color. Ranges between D (best) to J (worst. 
+
+```{r, include = F}
+cat_data <- data %>% 
+  mutate(length = x, width = y, depth_percent = depth, depth = z, price = log(price),
+         cut = as.character(cut), color = as.character(color), 
+         clarity = as.character(clarity)) %>% 
+  filter(depth != 0) %>% 
+  select(-x, -y, -z)
+```
+
+When initially examining `price`, we noticed that it was heavily right skewed. As a result, we decided to log transform price (base $e$). A comparison of the non-transformed and transformed distribution of price can be seen in plots 1 and 2 below. 
+
+```{r, include = F}
+#non transformed
+non_transformed <- ggplot(data = data, aes(x = price)) +
+  geom_density(fill="blue") +
+  ggtitle("Distribution of price", subtitle = "gaussian kernel bs = nrd") +
+  labs(caption = "plot 1")
+
+# transformed
+transformed <- ggplot(data = cat_data, aes(x = price)) +
+  geom_density(kernel = "rectangular", bw = "sj", fill="red") +
+  ggtitle("Distribution of log(price)", subtitle = "rectangular kernel, SJ bandwidth") +
+  labs(caption = "plot 2", x = "log(price)")
+```
+
+```{r, fig.height=4.5, fig.width=8, echo = F}
+grid.arrange(non_transformed, transformed, ncol = 2)
+```
+
+We utilized `ggpairs()` to examine the quantitative variables in our data. 
+
+```{r, echo = F}
+ggpairs(dplyr::select(cat_data, length, width, depth, carat, depth_percent, price))
+```
+
+As seen above, we noticed that `length`, `width` and `depth` appear to have a strong correlation with log(`price`) and all follow a very similar trend (upward sloping and linear). Additionally, these three variables are also strongly correlated with `carat.` `depth_percent` does not appear to be correlated with log(`price`) (Pearson's correlation of -0.0615).  Lastly, `carat` appeared to have the most non-linear relationship with log(`price`).
+
+Because of this observed non-linear relationship between `carat` and `price`, we hypothesized that the correlation reported in the `ggpairs()` output above underestimated the actual correlation. `ggpairs()` reports correlation using a Pearson Coefficient, which is ideal for linear relationships, but often underestimates non-linear correlation. Thus, we performed a Spearman's test for correlation on `carat` and `price`.  Spearman's method is ideal for non-linear relationships.  The results of our Spearman's correlation test (outlined below) give a correlation of 0.965 (which is larger than the reported correlation of 0.925). 
+
+**Hypotheses:**
+
+$H_0: \rho = 0; H_A: \rho \neq 0$
+
+Let $\alpha = 0.05$ and $\rho$ represent the correlation between length and price.  
+
+**Assumptions:**
+
+We will assume that all pairs of observations are independent from each other.
+
+**Test Results:**
+
+$p \approx 0$, $\rho = 0.965$
+```{r, include = F}
+cor.test(x = cat_data$carat, y = cat_data$price, data = cat_data, method = "spearman")
+```
+
+
+**Conclusion:**
+
+Because $p \approx 0 < \alpha = 0.05$ for the Spearman's's test for correlation, we reject our null hypotheses. Thus, carat is correlated with log(price). 
+
+
+# Methods
+
+### OLS MLR
+
+We aimed to build a more precise model that eliminated predictors that did not enhance predictive power. We used forward stepwise regression, which systematically adds variables to a model until the adjusted $R^2$ (i.e. how well the model fits data) fails to increase. We utilized forward stepwise linear regression to examine all possible predictors (carat, depth, table, length, width, color, clarity, and cut). The results of the forward stepwise regression are depicted in Table 1. 
+
+```{r, include = F}
+cat_and_quant_lm <- lm(price ~ carat + depth + table + length + width + depth_percent
+                       + color + clarity + cut, data = cat_data)
+
+stepwise_output <- ols_step_forward_p(cat_and_quant_lm)
+stepwise_predictors <- stepwise_output$predictors
+stepwise_adjr <- round(stepwise_output$adjr, 3) # rounding adjr
+stepwise_aic <- round(stepwise_output$aic, 3)
+steps <- c(1, 2, 3, 4, 5, 6, 7)
+stepwise_df <- data.frame(cbind(steps, stepwise_predictors, stepwise_adjr, stepwise_aic))
+colnames(stepwise_df) <- c("Step", "Predictors", "\\(R^2_\\text{adj.}\\)", "AIC")
+
+table_stepwise <- knitr::kable(stepwise_df, format = "latex", booktabs = TRUE, escape = FALSE)%>% 
+  kableExtra::kable_styling(font_size = 10, position = "center", row_label_position = "c", full_width = F) %>%
+  add_header_above(c("Table 1: Stepwise regression results" = 4))
+```
+
+```{r, echo = F}
+table_stepwise
+```
+
+We noticed that forward stepwise regression excluded the `depth_percent` and `table` variables. 
+
+After stepwise regression, we built a multiple regression model to predict log(`price`) from the predictors included in forward stepwise regression. We exlcuded cut as it was the last categorical variable added and was largely explained by length and width. Each cateogrical and quantitative variable with their respective coefficients and p-values can be seen below in Table 2. 
+
+```{r, include = F}
+final_lm <- lm(price ~ width + clarity + color + carat + depth + 
+                 length, data = cat_data)
+
+summary_final_lm <- summary(final_lm)
+
+# get the coefficients
+final_lm_coeffs <- data.frame(summary_final_lm$coefficients)
+
+# get the names of the predictors
+predictors_final_lm <- rownames(final_lm_coeffs)
+
+# get the r-squared adjusted
+final_lm_adjr <- summary_final_lm$adj.r.squared
+
+# make the final df
+final_lm_df <- cbind(predictors_final_lm, final_lm_coeffs)
+
+final_lm_df <- select(final_lm_df, predictors_final_lm, Estimate, Pr...t..) 
+
+colnames(final_lm_df) <- c("Predictors", "Estimate", "P.value")
+
+# final_lm_df <- mutate(final_lm_df, indicator = ifelse(P.value < 0.0001, 1, 0))
+
+final_lm_df <- mutate(final_lm_df, indicator = ifelse(P.value < 0.0001, "< 0.0001", "6"))
+final_lm_df[1,4] <- round(0.5915609, 5)
+final_lm_df[2,4] <- round(0.0131907, 5)
+final_lm_df[10,4] <- round(0.3061189, 5)
+final_lm_df[11,4] <- round(0.0003385, 5)
+
+final_lm_df <- final_lm_df %>% select(-P.value) 
+
+colnames(final_lm_df) <- c("Predictors", "Estimate", "P-value")
+
+top_final_lm_df <- final_lm_df[0:9, ]
+bottom_final_lm_df <- final_lm_df[10:18, ]
+whole_df <- cbind(top_final_lm_df, bottom_final_lm_df)
+
+# making table for kable
+table_final_lm <- knitr::kable(whole_df, format = "latex", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 10, position = "center", row_label_position = "l") %>% 
+  add_header_above(c("log(price) ~ width + clarity + color + carat + depth + length" = 6)) %>% 
+  add_header_above(c("Table 2: OLS model summary results" = 6)) %>% 
+  column_spec(column = 3, border_right = TRUE)
+```
+
+```{r, echo = FALSE}
+table_final_lm 
+```
+Note: $R^2_\text{adj} = 0.983$
+
+
+### Is OLS the best or should we use JHM (nonparametric approach)? 
+
+In order to decide if we were able to use an OLS model to predict log(`price`), we needed to examine the model's residuals for normality. Plot 3 below depicts the density of the OLS MLR model's residuals.  
+
+```{r, include = FALSE}
+residuals <- final_lm$residuals
+residuals <- as.data.frame(residuals)
+colnames(residuals) <- c("residuals")
+residual_model_plot <- ggplot(data = residuals, aes(x = residuals)) +
+  geom_density(fill = "orange") +
+  ggtitle("Distribution of OLS residuals") +
+  labs(caption = "plot 3")
+```
+
+```{r, echo = FALSE, fig.height=3.25, fig.width=3.25, fig.align="center"}
+residual_model_plot
+```
+
+At first glance, the distribution looks relatively normal. We formally tested the residuals for normality using a kolmogorov-smirnov test. The details of the test are outline below: 
+
+
+**Hypotheses:**
+
+$H_0:F(t)=F^{star}(t); H_A:F(t) \neq F^{star}(t)$ for at least one $t$, where $F^{star}(t)$ is the normal distribution and $F(t)$ is the observed distribution of price. 
+
+**Assumptions:**
+
+Data come from a continuous distribution 
+
+**Test:**
+
+$p \approx 0$ 
+```{r, warning = FALSE, include = FALSE}
+ks.test(x = residuals$residuals, y = pnorm, sd = 0.133111, alternative = c("two.sided"))
+```
+
+The empirical CDF of price compared to the normal CDF with observed mean and standard deviation is below (plot 4): 
+```{r, include = F}
+norm_cdf <- data.frame(cbind(c(seq(from = min(residuals$residuals), to = max(residuals$residuals), by = 0.01)), pnorm(seq(from = min(residuals$residuals), to = max(residuals$residuals), by = 0.01), mean = mean(residuals$residuals), sd = sd(residuals$residuals))))
+
+ecdf_plot <- ggplot() +
+  geom_point(inherit.aes = F, data = norm_cdf, aes(x = X1, y = X2), size = 1, color = "#F8766D") + 
+  stat_ecdf(data = residuals, aes(x = residuals)) + 
+  scale_x_continuous(name = "residuals") +
+  scale_y_continuous(name = "Empirical CDF") +
+  ggtitle("Empirical CDF of OLS residuals", subtitle = "red = normal CDF") +
+  labs(caption = "plot 4")
+```
+
+```{r, echo = FALSE, fig.height=3.25, fig.width=3.25, fig.align="center"}
+ecdf_plot
+```
+
+**Conclusion:**
+
+Because $p \approx 0 < \alpha = 0.05$, we reject our null hypotheses. We conclude that the distribution of the OLS residuals is not normal.
+
+
+### JHM - Final model
+
+Since the OLS model residuals do not follow a normal distribution, we will create an JHM (rank based) regression model. Our JHM model included the same predictors as our OLS MLR. Each cateogrical and quantitative variable with their respective coefficients and p-values can be seen below in Table 3. 
+
+```{r, include = F}
+rfit_final <- rfit(price ~ width + clarity + color + carat + depth 
+                   + length, data = cat_data)
+
+
+# data.frame(summary(rfit_final)$coefficients) %>% select(p.value)
+
+summary_rfit_lm <- summary(rfit_final)
+
+# get the coefficients
+rfit_lm_coeffs <- data.frame(summary_rfit_lm$coefficients)
+
+# get the names of the predictors
+predictors_rfit_lm <- rownames(rfit_lm_coeffs)
+
+# get the r-squared adjusted
+rfit_lm_adjr <- summary_rfit_lm$R2
+
+# make the final df
+rfit_lm_df <- cbind(predictors_rfit_lm, rfit_lm_coeffs)
+
+rfit_lm_df <- select(rfit_lm_df, predictors_rfit_lm, Estimate, p.value) 
+
+colnames(rfit_lm_df) <- c("Predictors", "Estimate", "P.value")
+
+rfit_lm_df <- mutate(rfit_lm_df, indicator = ifelse(P.value < 0.0001, 1, 0))
+
+rfit_lm_df <- mutate(rfit_lm_df, indicator = ifelse(P.value < 0.0001, "< 0.0001", "FALSE"))
+
+rfit_lm_df[1,4] <- 0.93893
+rfit_lm_df[2,4] <- 0.01848
+rfit_lm_df[10,4] <- 0.29299
+rfit_lm_df[11,4] <- 0.00054
+
+rfit_lm_df <- rfit_lm_df %>% select(-P.value) 
+
+colnames(rfit_lm_df) <- c("Predictors", "Estimate", "P-value")
+
+top_rfit_lm_df <- rfit_lm_df[0:9, ]
+bottom_rfit_lm_df <- rfit_lm_df[10:18, ]
+rfit_whole_df <- cbind(top_rfit_lm_df, bottom_rfit_lm_df)
+
+# making table for kable
+table_rfit_lm <- knitr::kable(rfit_whole_df, format = "latex", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 10, position = "center", row_label_position = "l") %>% 
+  add_header_above(c("log(price) ~ width + clarity + color + carat + depth + length" = 6)) %>%
+  add_header_above(c("Table 3: JHM model summary results" = 6)) %>% 
+  column_spec(column = 3, border_right = TRUE)
+```
+
+```{r, echo = F}
+table_rfit_lm
+```
+
+
+The plots below represent the JHM model fit for each quantitative variable. The red line presents the slope for that particular predictor in the presence of others. The blue dashed line indicates the mean of log(`price`). We noticed that all four variables follow a similar trend. This is potentially indicative of multicollinearity. 
+
+
+```{r, include = FALSE}
+#rfit_final
+mean_y = mean(cat_data$price)
+mean_width = mean(cat_data$width)
+mean_carat = mean(cat_data$carat)
+mean_depth = mean(cat_data$depth)
+mean_length = mean(cat_data$length)
+
+coef_width = summary(rfit_final)$coefficients[2]
+coef10_width = mean_y - coef_width*mean_width
+coef2_width = summary(rfit_final)$coefficients[2]
+coef20_width = mean_y - coef2_width*mean_carat
+coef3_width = summary(rfit_final)$coefficients[2]
+coef30_width = mean_y - coef3_width*mean_depth
+coef4_width = summary(rfit_final)$coefficients[2]
+coef40_width = mean_y - coef4_width*mean_length
+
+rfit_plot1 <- ggplot(data = cat_data, aes(x = width, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef10_width, slope = coef_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. width") +
+  ylab("log(price)") +
+  labs(caption = "Plot 5a")
+
+rfit_plot2 = ggplot(data = cat_data, aes(x = carat, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef20_width, slope = coef2_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. carat") +
+  ylab("log(price)") +
+  labs(caption = "Plot 5b")
+
+
+rfit_plot3 <- ggplot(data = cat_data, aes(x = depth, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef30_width, slope = coef3_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. depth") +
+  ylab("log(price)") +
+  labs(caption = "Plot 5c")
+
+
+rfit_plot4 <- ggplot(data = cat_data, aes(x = length, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef40_width, slope = coef4_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. length") +
+  ylab("log(price)") +
+  labs(caption = "Plot 5d")
+```
+
+```{r, echo = FALSE}
+grid.arrange(rfit_plot1, rfit_plot2, rfit_plot3, rfit_plot4)
+```
+
+The plots below represent each categorical variable in the JHM model. The height of each point represents the coefficient ($\beta$ value) for that level of the categorical variable. The blue dashed line represents the baseline indicator level for each variable. 
+
+```{r, include = F}
+#ploting categorical variables
+#color
+coefs_color <- rfit_final$coefficients[10:15]
+coefs_color_df <- as.data.frame(coefs_color)
+colnames(coefs_color_df) <- c("coefficients_vals")
+color_options <- c("colorE", "colorF", "colorG", "colorH", "colorI", "colorJ")
+color_options <- as.data.frame(color_options)
+color_df <- cbind(color_options, coefs_color_df)
+
+color_plot <- ggplot(data = color_df,
+                     aes(x = color_options, y = coefficients_vals)) +
+  geom_point() +
+  ggtitle("Coefficients for color", subtitle = "dashed line = reference level") +
+  xlab("color") +
+  ylab("coefficient") +
+  ylim(-0.5, 0.1) +
+  geom_hline(yintercept = 0, lty = 2, color = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(caption = "Plot 6a")
+
+#clarity plot
+coefs_clarity <- rfit_final$coefficients[3:9]
+coefs_clarity_df<- as.data.frame(coefs_clarity)
+colnames(coefs_clarity_df) <- c("coefficients_vals_cl")
+clarity_options <- c("clarityIF", "claritySI1", "claritySI2", "clarityVS1", "clarityVS2", "clarityVVS1", "carityVVS2")
+clarity_options <- as.data.frame(clarity_options)
+clarity_df <- cbind(clarity_options, coefs_clarity_df)
+
+clarity_plot <- ggplot(data = clarity_df,
+                     aes(x = clarity_options, y = coefs_clarity)) +
+  geom_point() +
+  ggtitle("Coefficients for clarity", subtitle = "dashed line = reference level") +
+  xlab("clarity") +
+  ylab("coefficient") +
+  ylim(-0.1, 1.1) +
+  geom_hline(yintercept = 0, lty = 2, color = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(caption = "Plot 6b")
+  
+```
+
+```{r, echo=FALSE, fig.height=3.25, fig.width=7, fig.align="center"}
+grid.arrange(color_plot, clarity_plot, ncol = 2)
+```
+
+
+### GAM
+
+We were also interested in examining how well the same set of predictors estimate price in a Gereralized Additive Model (GAM).  First, we examined the quantitative predictors (`length`, `width`, `depth` and `carat`) for any obvious relationships with log(`price`). 
+
+```{r, include = FALSE}
+length_plot <- ggplot(data = cat_data, aes(x = length, y = price)) +
+  geom_point() +
+  ggtitle("log(price) vs. length") +
+  ylab("log(price)") +
+  labs(caption = "Plot 7a")
+
+width_plot <- ggplot(data = cat_data, aes(x = width, y = price)) +
+  geom_point() +
+  ggtitle("log(price) vs. width") +
+  ylab("log(price)") +
+  labs(caption = "Plot 7b")
+
+depth_plot <- ggplot(data = cat_data, aes(x = depth, y = price)) +
+  geom_point() + 
+  ggtitle("log(price) vs. depth") +
+  ylab("log(price)") +
+  labs(caption = "Plot 7c")
+
+carat_plot <- ggplot(data = cat_data, aes(x = carat, y = price)) +
+  geom_point() +
+  ggtitle("log(price) vs. carat") +
+  ylab("log(price)") +
+  labs(caption = "Plot 7d")
+```
+
+```{r, echo=FALSE}
+grid.arrange(length_plot, width_plot, depth_plot, carat_plot, ncol = 2)
+```
+
+We noticed that length, width and depth all appear to follow a similar pattern. Because of this, we hypothesized that a smoother would most likely not be necessary for all three of these predictors.  We also noted that `carat` is most likely co-linear with `length`, `width` and `depth`, so we noted that we may be able to explain carat's variability using other predictors. 
+
+Our first step in building the GAM incorporated comparing a SLR and a smoothing spline for each quantitative predictor. We utilized adjusted $R^2$ as a metric for model fit (calculated using the function below). 
+
+```{r}
+#function for calculating adjusted r-squared for gam
+gam_adjusted <- function(model){
+  rsq_gam = 1 - model$deviance/model$null.deviance
+  adjrsq_gam = 1 - (1 - rsq_gam)*(model$df.null/model$df.residual)
+  return(adjrsq_gam)
+}
+```
+
+```{r, warning=F, echo = FALSE}
+#WIDTH
+smoothing_width <- gam(price ~ s(width, df = 6), data = cat_data)
+slr_width <- lm(price ~ width, data = cat_data)
+#gam_adjusted(smoothing_width)
+
+#LENGTH
+smoothing_length <- gam(price ~ s(length, df = 6), data = cat_data)
+slr_length <- lm(price ~ length, data = cat_data)
+#gam_adjusted(smoothing_length)
+
+#CARAT
+smoothing_carat <- gam(price ~ s(carat, df = 6), data = cat_data)
+slr_carat <- lm(price ~ carat, data = cat_data)
+#gam_adjusted(smoothing_carat)
+
+#DEPTH
+smoothing_depth <- gam(price ~ s(depth, df = 6), data = cat_data)
+slr_depth <- lm(price ~ depth, data = cat_data)
+#gam_adjusted(smoothing_depth)
+```
+
+A summary of the adjusted $R^2$ values for each model type can be seen in Table 4 below. 
+
+```{r, include = F}
+adjrsquared_slr <- c(0.931, 0.929, 0.856, 0.870)
+adjrsquared_gam <- c(0.943, 0.942, 0.941, 0.935)
+predictors <- c("width", "length", "carat", "depth")
+#create data table
+decision_table <- cbind(predictors, adjrsquared_slr, adjrsquared_gam)
+# colnames(decision_table) <- c("Predictor", "SLR", "Smooth")
+
+decision_table <- knitr::kable(decision_table, "latex", booktabs = TRUE, escape = FALSE, col.names = c("Predictor", "SLR", "Smooth")) %>% 
+  kableExtra::kable_styling(font_size = 10, position = "center", row_label_position = "l", full_width = F) %>% 
+  # add_header_above(c("Table 4: SLR vs. smooth \\(R^2_\\text{adj}\\)" = 3))
+  add_header_above(c("Table 4: SLR vs. smooth $R^2_{\\\\text{adj}}$" = 3), escape = FALSE)
+
+```
+
+```{r, echo = FALSE}
+decision_table
+```
+
+As seen in Table 4, for all 4 of the quantitative predictors, the $R^2_\text{adj}$ for the smoother was greater than the SLR.  
+
+We next built several potential GAMs for these 4 quantitative predictors. We included both categorical variables (clarity and color) for all models. The following is a summary and rationale for each model:
+
+1. gam_full: a smoothing spline on a 4 quantitative predictors. We started with this GAM as our tests comparing smoothing to SLR suggested smoothing was as better metric for each variable. 
+
+2. gam_mod2: a smoothing spline on `carat` and `depth` and linear relationships for `length` and `width`. We chose to make `length` and `width` linear because a plot of their relationship showed a linear relationship with `log(price)`. We recongized that using smoothers on all 4 predictors in a GAM tends to lead to overfitting. 
+
+3. gam_mod3: a smoothing spline on `width` and linear relationship for `depth` and `carat.` We noticed that, in the presence of other predictors, `carat` was essentially linear. Switching `carat` from a smoothing spline to linear relationship would decrease the degrees of freedom and could improve the performance of our model. In this model, we also tried removing `length` as it seemed colinear with `width, depth` and `carat.` 
+
+4. gam_mod4: linear predictors on all variables. The general trend of the data appeared to be very close to linear for all predictors. 
+
+5. gam_mod5: smoothers on `length` and `width` and linear relationships for `depth` and `carat.` We decided to include all 4 quantitative variables in this model as removing one resulted in an increase in AIC. 
+
+
+```{r, include = F, warning = F}
+#with all quantitative predictors 
+gam_full <- gam(price ~ clarity + color + 
+                 s(length, df = 6) + 
+                 s(width, df = 6) + 
+                 s(depth, df = 6) + 
+                 s(carat, df = 6), 
+               data = cat_data)
+
+gam_mod2 <- gam(price ~ clarity + color + length + width +
+                  s(carat, df = 6) +
+                  s(depth, df = 6), 
+                data = cat_data)
+
+gam_mod3 <- gam(price ~ clarity + color + depth + carat +
+                  s(width, df = 6),
+                data = cat_data)
+
+gam_mod4 <- gam(price ~ clarity + color + depth + carat + width,
+                data = cat_data)
+
+gam_mod5 <- gam(price ~ clarity + color + depth + carat +
+                 s(length, df = 6) + 
+                 s(width, df = 6),
+               data = cat_data)
+
+AIC(gam_full, gam_mod2, gam_mod3, gam_mod4, gam_mod5)
+```
+
+A summary of each GAM's performance is summarized in table 5, below. 
+
+```{r, include = F}
+aics <- c(-649.94, -612.54, -596.29, -545.24, -652.97)
+modelNames <- c("color + clarity + s(length) + s(width) + s(depth) + s(carat)", 
+                "color + clarity + length + width + s(depth) + s(carat)", 
+                "color + clarity + depth + carat + s(width)", 
+                "color + clarity + depth + carat + width + length", 
+                "color + clarity + depth + carat + s(width) + s(length)")
+
+#create df
+choose_gam_table <- data.frame(cbind(modelNames, aics))
+colnames(choose_gam_table) <- c("Model", "AIC")
+
+choose_gam_table <- knitr::kable(choose_gam_table, "latex", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 10, position = "center", row_label_position = "l", full_width = F) %>% 
+  add_header_above(c("Table 5: Comparison of AIC between GAM models" = 2))
+```
+
+```{r, echo = F}
+choose_gam_table
+```
+
+As seen in table 5, `gam_mod5` had the lowest AIC. Plots of this GAM's performance in comparison to a smoothing spine are below. 
+
+```{r, include = F}
+#plot gam 5
+gam_5_c = predict(gam_mod5, type = "terms") 
+gam_5_y = fitted(gam_mod5) 
+diamonds_subset = select(.data = cat_data, clarity, color, depth, carat, length, width, price)
+gam_5_plots = cbind(diamonds_subset, gam_5_c, gam_5_y)
+cnn = c(colnames(diamonds_subset),"clarity_pred", "color_pred", "depth_pred",
+        "carat_pred", "length_pred", "width_pred", "price_pred")
+price_m = mean(diamonds_subset$price)
+colnames(gam_5_plots) = cnn
+#length plot
+plotl5 <- ggplot(data = cat_data, aes(x = length, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = length, y = length_pred + price_m)) +
+  ggtitle("log(price) vs. length") +
+  ylab("log(price)") +
+  labs(caption = "Plot 8a")
+
+#width plot
+plotw5 <- ggplot(data = cat_data, aes(x = width, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = width, y = width_pred + price_m)) +
+  ggtitle("log(price) vs. width") +
+  ylab("log(price)") +
+  labs(caption = "Plot 8b")
+
+#depth plot
+plotd5 <- ggplot(data = cat_data, aes(x = depth, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = depth, y = depth_pred + price_m)) +
+  ggtitle("log(price) vs. depth") +
+  ylab("log(price)") +
+  labs(caption = "Plot 8c")
+
+#carat plot
+plotc5 <- ggplot(data = cat_data, aes(x = carat, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = carat, y = carat_pred + price_m)) +
+  ggtitle("log(price) vs. carat") +
+  ylab("log(price)") +
+  labs(caption = "Plot 8d")
+
+#resids
+plotr5 <- ggplot() + 
+  geom_point(aes(x=gam_mod5$fitted.values, y=gam_mod5$residuals)) +
+  labs(x = "log(price)", y = "GAM Residuals") +
+  ggtitle("Residuals of gam_mod4") +
+  labs(caption = "Plot 8e")
+```
+
+```{r, echo = F, warning = F, comment = F, message = F}
+grid.arrange(plotl5, plotw5, plotd5, plotc5, plotr5, ncol = 3)
+```
+
+### Explaining the roles of `carat` and `width`  in the model
+
+As seen in plots 8b and 8d, carat and width have very peculiar GAM lines. We hypothesized that these lines explain the variability and error introduced into the model by the other predictors. When examining `carat`, a plot of the residual error of the model with `depth`, the smoother on `width`, and the smoother on `length` against `carat` demonstrates that the GAM for carat directly explains the variability of the model caused by the 3 remaining quantitative variables. This is evident in plot 9a. Similarly, when examining `width`, a plot of the residual error of the model with `depth`, `carat`, and the smoother on `length` shows that the GAM for `width` also explains the variability of the model caused by the other 3 quantitative predictors. This is depicted on plot 9b. 
+
+
+```{r, include = F}
+mod <- cat_data$price-(mean(cat_data$price) + predict(gam_mod5, type = "terms")[,5] + predict(gam_mod5, type = "terms")[,6] + 0.69298443*cat_data$depth)
+
+
+model_resids_plot <- ggplot() +
+  geom_point(aes(x = cat_data$carat, y = mod)) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = carat, y = carat_pred - (1/3)*price_m)) +
+  ggtitle("Error explained by carat") +
+  labs(caption = "Plot 9a") +
+  ylab("Y - Y-bar + B(depth) + s(width) + s(length)") +
+  xlab("carat")
+```
+
+```{r, include = F}
+mod_w <- cat_data$price-(mean(cat_data$price) + predict(gam_mod5, type = "terms")[,5] + -0.25247515*cat_data$carat + 0.69298443*cat_data$depth)
+
+
+model_resids_plot_w <- ggplot() +
+  geom_point(aes(x = cat_data$width, y = mod_w)) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = width, y = width_pred - (1/3)*price_m)) +
+  ggtitle("Error explained by width") +
+  labs(caption = "plot 9b") +
+  ylab("Y - Y-bar + B(depth) + B(carat) + s(length)") +
+  xlab("carat")
+```
+
+```{r, echo = FALSE, fig.width=7, fig.height=4, fig.align="center"}
+grid.arrange(model_resids_plot, model_resids_plot_w, ncol = 2)
+```
+
+# Discussion
+
+### Proof of our models: Examining Residuals
+```{r, include = F, warning=FALSE}
+jhm_resids <- as.data.frame(rfit_final$residuals)
+colnames(jhm_resids) <- c("resids")
+
+y_bar_model <- lm(price ~ 1, data = cat_data)
+y_bar_resids <- as.data.frame(y_bar_model$residuals)
+colnames(y_bar_resids) <- c("resids")
+
+gam_resids <- as.data.frame(gam_mod5$residuals)
+colnames(gam_resids) <- c("resids")
+
+ols_resids <- as.data.frame(final_lm$residuals)
+colnames(ols_resids) <- c("resids")
+
+#oneplot
+all_resids_plot <- ggplot() +
+  stat_ecdf(inherit.aes = F,
+            data = jhm_resids, aes(x = resids, color = "blue"), geom = "step", position = "identity") +
+  stat_ecdf(inherit.aes = F,
+            data = y_bar_resids, aes(x = resids, color = "red"), geom = "step", position = "identity") +
+  stat_ecdf(inherit.aes = F,
+            data = gam_resids, aes(x = resids, color = "green"), geom = "step", position = "identity") +
+  stat_ecdf(inherit.aes = F,
+            data = ols_resids, aes(x = resids, color = "orange"), geom = "step", position = "identity") +
+  scale_x_continuous(name = "residuals") +
+  xlim(-0.5, 0.5) +
+  scale_y_continuous(name = "Empirical CDF") +
+  ggtitle("Comparing GAM, JHM, OLS & null-model residuals") +
+  labs(caption = "plot 10") +
+  scale_color_identity(name = "Model",
+                          breaks = c("blue", "red", "green", "orange"),
+                          labels = c("JHM", "Null", "GAM", "OLS"),
+                          guide = "legend") +
+  xlab("residuals")
+  
+```
+
+```{r, warning = FALSE, echo=FALSE, message=FALSE, comment=FALSE, fig.height=4, fig.width=5.5, fig.align="center"}
+suppressWarnings(all_resids_plot)
+```
+
+As seen in the plot 10 above, the disribution of the GAM, OLS and JHM residuals are all very similar. The null is clearly performing the worst as the eCDF of the residuals is clearly not close to matching a normal CDF. The more vertical the eCDF, the more variability explained in the model (which is indicative of a more efffective model). Because we already found that using a parametric approach is not possible (the residuals are not normally distributed), we will focus primarily on the GAM and JHM.  
+
+As seen in plot 10, while both the JHM and GAM residuals follow a fairly normal distribution, the JHM is slighly less vertical than the GAM. This suggests that the GAM might be a slightly better model. 
+
+### Using Cross Validation to assess model fit
+
+We also used a cross-validation appraoch to estimate the adjusted $R^2$, and L1-proportion for each of the our 3 models (OLS, JHM, GAM). Table 6 below depicts the $R^{2}$, $R^2_\text{adj}$ and L1-proportion on the original data as well as $R^{2}$, $R^2_\text{adj}$ and L1-proportion using cross validation.  
+
+```{r, include = F}
+#Fit statistics for OLS
+fit_ols = function(model) {
+  yy = model$residuals + model$fitted.values
+  rsq = 1 - sum(model$residuals^2)/sum((yy - mean(yy))^2)
+  nn = length(yy)
+  adjrsq = 1 - (1 - rsq)*((nn - 1)/(nn - length(model$coefficients)))
+  propL1 = 1 - sum(abs(model$residuals))/sum(abs(yy - mean(yy)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#Fit statistics for JHM
+fit_jhm = function(model) {
+  rsq = 1 - sum(model$residuals^2)/sum((model$y - mean(model$y))^2)
+  nn = length(model$y)
+  adjrsq = 1 - (1 - rsq)*((nn - 1)/(nn - length(model$coefficients)))
+  propL1 = 1 - sum(abs(model$residuals))/sum(abs(model$y - mean(model$y)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#Fit statistics for GAM
+fit_gam = function(model) {
+  rsq = 1 - model$deviance/model$null.deviance
+  adjrsq = 1 - (1 - rsq)*(model$df.null/model$df.residual)
+  propL1 = 1 - sum(abs(model$residuals))/sum(abs(model$y - mean(model$y)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#General fit statistics
+fit_gen = function(y, res, df){
+  rsq = 1 - sum(res^2)/sum((y - mean(y))^2)
+  nn = length(y)
+  adjrsq = 1 - (1 - rsq)*((nn - 1)/(nn - df))
+  propL1 = 1 - sum(abs(res))/sum(abs(y - mean(y)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#My cross-validation function for this project
+cv_rmc = function(dat, ols_mod, jhm_mod, gam_mod, k = 5, m = 10){
+  #(Some) error checking
+  if(class(ols_mod) != "lm") stop('ols_mod should come from the lm() function')
+  if(class(jhm_mod) != "rfit") stop('jhm_mod should come from the rfit() function')
+  if(class(gam_mod)[1] != "Gam") stop('gam_mod should come from the gam() function')
+  #Create model call character strings with subsetted data; uses stringr f()s
+  dat.name = paste0("data = ", deparse(substitute(dat)))
+  ols_call = capture.output(ols_mod$call)
+  ols_call = str_replace(ols_call, dat.name, "data = dat[-part[[i]], ]")
+  jhm_call = capture.output(jhm_mod$call)
+  jhm_call = str_replace(jhm_call, dat.name, "data = dat[-part[[i]], ]")
+  gam_call = paste(str_trim(capture.output(gam_mod$call)), sep="", collapse="")
+  gam_call = str_replace(gam_call, dat.name, "data = dat[-part[[i]], ]")  
+  #Set up objects
+  ols_fit = matrix(nrow = m, ncol = 3)
+  jhm_fit = ols_fit; gam_fit = ols_fit
+  yy = jhm_mod$y
+  nn = dim(as.data.frame(dat))[1]
+  oos_lmres = vector(length = nn)
+  oos_jhres = oos_lmres; oos_gares = oos_lmres
+  df_ols = length(ols_mod$coefficients)
+  df_jhm = length(jhm_mod$coefficients)
+  df_gam = nn - gam_mod$df.residual
+  #Repeat k-fold cross-validation m times
+  for(j in 1:m) {
+    #Split data into k equal-ish parts, with random indices
+    part = suppressWarnings(split(sample(nn), 1:k))
+    #Execute model calls for all k folds; %*% is matrix multiplication
+    for(i in 1:k){
+      lm_mod = eval(parse(text = ols_call))
+      5
+      
+      pred = predict(object = lm_mod, newdata = dat[part[[i]],])
+      oos_lmres[part[[i]]] = yy[part[[i]]] - pred
+      jh_mod = eval(parse(text = jhm_call))
+      subdat = select(.data = dat, colnames(jh_mod$x)[-1])[part[[i]],]
+      subdat = cbind(1, as.matrix.data.frame(subdat))
+      pred = subdat %*% jh_mod$coefficients
+      oos_jhres[part[[i]]] = yy[part[[i]]] - pred
+      ga_mod = eval(parse(text = gam_call))
+      pred = predict(object = ga_mod, newdata = dat[part[[i]],])
+      oos_gares[part[[i]]] = yy[part[[i]]] - pred
+    }
+    ols_fit[j, ] = fit_gen(y = yy, res = oos_lmres, df = df_ols)
+    jhm_fit[j, ] = fit_gen(y = yy, res = oos_jhres, df = df_jhm)
+    gam_fit[j, ] = fit_gen(y = yy, res = oos_gares, df = df_gam)
+}
+#Manage output -- average fit statistics
+  outtie = rbind(colMeans(ols_fit), colMeans(jhm_fit), colMeans(gam_fit))
+  colnames(outtie) = paste0("cv.", colnames(fit_ols(lm_mod)))
+  row.names(outtie) = c("OLS", "JHM", "GAM")
+  return(outtie)
+}
+```
+
+```{r, echo = F}
+fit_final = rbind(fit_ols(final_lm), fit_jhm(rfit_final), fit_gam(gam_mod4))
+rownames(fit_final) = c("OLS", "JHM", "GAM")
+```
+
+```{r, include = F}
+#create temp dataset to pass into dat
+cat_data_temp <- cat_data %>% 
+  mutate(clarityIF = ifelse(clarity == "IF", 1, 0),
+         claritySI1 = ifelse(clarity == "SI1", 1, 0),
+         claritySI2 = ifelse(clarity == "SI2", 1, 0),
+         clarityVS1 = ifelse(clarity == "VS1", 1, 0),
+         clarityVS2 = ifelse(clarity == "VS2", 1, 0),
+         clarityVVS1 = ifelse(clarity == "VVS1", 1, 0),
+         clarityVVS2 = ifelse(clarity == "VVS2", 1, 0)) %>% 
+  mutate(colorE = ifelse(color == "E", 1, 0),
+         colorF = ifelse(color == "F", 1, 0),
+         colorG = ifelse(color == "G", 1, 0),
+         colorH = ifelse(color == "H", 1, 0),
+         colorI = ifelse(color == "I", 1, 0),
+         colorJ = ifelse(color == "J", 1, 0)) %>% 
+  select(-color, -clarity)
+
+#build new jhm model using temp dataset
+rfit_final_temp <- rfit(price ~ width + carat + depth + length + clarityIF +
+                          claritySI1 + claritySI2 + clarityVS1 + clarityVS2 +
+                          clarityVVS1 + clarityVVS2 + colorE + colorF + colorG 
+                        + colorH + colorI + colorJ, 
+                   data = cat_data_temp)
+
+ols_final_temp <- lm(price ~ width + carat + depth + length + clarityIF +
+                          claritySI1 + claritySI2 + clarityVS1 + clarityVS2 +
+                          clarityVVS1 + clarityVVS2 + colorE + colorF + colorG 
+                        + colorH + colorI + colorJ, 
+                   data = cat_data_temp)
+
+gam_mod5_temp <- gam_mod5 <- gam(price ~ clarityIF + claritySI1 + claritySI2 +
+                                   clarityVS1 + clarityVS2 + 
+                                   clarityVVS1 + clarityVVS2 + 
+                                   colorE + colorF + colorG 
+                                 + colorH + colorI + colorJ + 
+                                   depth + carat +
+                 s(length, df = 6) + 
+                 s(width, df = 6),
+               data = cat_data_temp)
+```
+
+```{r, include = F, warning=F}
+out10 <- cv_rmc(dat = cat_data_temp, ols_mod = ols_final_temp, jhm_mod = rfit_final_temp, gam_mod = gam_mod5_temp)
+kable(round(out10,4)) %>% kable_styling(position = "center")
+
+non_cv_res <- fit_final
+cv_res <- out10
+model_fit_df <- cbind(non_cv_res, cv_res)
+model_fit_df <- round(model_fit_df, 4)
+
+types <- c("OLS", "JHM", "GAM")
+model_fit_df <- cbind(types, model_fit_df)
+
+model_fit_df <- data.frame(model_fit_df)
+model_fit_df <- model_fit_df[ , -1]
+
+colnames(model_fit_df) <- c("\\(R^2\\)", 
+                            "\\(R^2_\\text{adj}\\)", 
+                            "\\(L1_{\\text{prop}}\\)",
+                            "\\(R^2\\)", 
+                            "\\(R^2_\\text{adj}\\)", 
+                            "\\(L1_{\\text{prop}}\\)")
+
+# making table for kable
+table_model_fit <- knitr::kable(model_fit_df, format = "latex", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 10, position = "center", row_label_position = "c", full_width = FALSE) %>% 
+  add_header_above(c("Regular approach" = 4, "Cross-validation approach" = 3)) %>% 
+  add_header_above(c("Table 6: Results from cross-validation" = 7)) %>% 
+  column_spec(column = 4, border_right = TRUE)
+```
+
+```{r, echo = F}
+table_model_fit
+```
+
+Because the 3 models were generated from the same dataaset on which the 3 measures of fit ($R^{2}$, $R^2_\text{adj}$ and L1-proportion) were calculated, the non-cross validation approach is potentially overfit to the data and the values are not as accurate. Cross validation, however, attempts to guard against overfitting. Thus, the values of the right side of Table 6 are how we will compare models. 
+
+All 3 models have relatively similar adjusted r-squared values. The GAM, however, has an adjusted r-squared of 0.9838, which is slightly higher than the OLS and JHM. In examining the $R^2$ values, OLS fails to explain 1.84% of the variability, while GAM fails to explain 1.53% of the variability. Thus, using the GAM model over OLS results in a 16% decrease in unexplained variability.  It is important to note that we cannot fairly use $R^2$ for JHM because of its ability to "ignore" outliers. The L1 proportion, however, denotes the absolute value of the residuals over the absolute value of the deviation of the mean (i.e. proportion of error explained by the model).  Notably, the L1 proportion value is also higher for the GAM. Based on our cross-validation results, the GAM is the best-performing model. 
+
+
+# Limitations and Challenges 
+
+There are two main limitations in our work. Our main statistical concern was the high level of multi-colinearity between `carat`, `length`, `width`, and `depth`. This overlap between predictors made it difficult to create a model that didn't incorporate variables that explained the same variation in log(`price`). This was most evident in creating our GAM. We were able to include SLR fits on two of these inter-related variables as a smoother was really only necessary on one - it explained the slight non-linear variability of the 3 remaining co-linear variables. 
+
+
+Our second concern arose from the dataset itself. We did not know what year (or group of years) the diamonds from within the dataset arose. Because of this, we will not be adjust for inflation when predicting diamond price in alternative years.  
+
+Overall, the main challenge we faced was dealing with the multicolinearity between our 4 main quantitative predictors.  We found it difficult to create models using our standard techniques as the results of our models were almost always riddled with impacts of multicollinearity. When building our GAM, for example, while we knew `length, width, depth and carat` were likely co-linear, removing any of them from the model resulted in an increase in AIC (indicating we couldn't remove them). Thus, our main challenge was finding ways to balance between using multicollinear variables and creating highly predictive models. 
+
+
+# Conclusion
+
+We suggest using a generalized additive model to predicting diamond price. We cannot use a parametric appraoch (i.e. OLS MLR) because the residuals of such a model are not normally distributed (as seen in the K-S test). The JHM model had a lower L1-proportion (from cross validation) when compared to the GAM. Because of this, we propose using a GAM to predict log(`price`) from d`epth, length, width, carat, color, and clarity` (with a smoothing spline on length and width). 
+
+
+
+

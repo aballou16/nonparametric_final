@@ -1,0 +1,792 @@
+---
+title: "STAT-225 Group 8 Final Project Presentation"
+subtitle: "Investigating Diamond Price"
+author: "Anna Ballou, Nicole Frontero, Alex Russell"
+date: "5/3/2020"
+output: ioslides_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(GGally)
+library(tidyverse)
+library(olsrr)
+library(Rfit)
+library(stats)
+library(gam)
+library(kableExtra)
+library(gridExtra)
+#library(emo)
+```
+
+
+
+
+## Introduction
+- Dataset: `diamonds`
+- Random sample: (500 observations from 54,000)
+- The observational unit: a diamond
+- Response variable: price in US dollars
+- Explanatory variables: `carat + cut + color + clarity + depth + table + x + y + z + depth_percent`
+```{r, include=FALSE}
+data(diamonds)
+temp <- select(diamonds, -price)
+colnames(temp)
+```
+- Note: `x` = length; `y` = width; `z` = depth; `carat` = mass; `table` = width of top of diamond
+
+## EDA: `ggpairs`
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+set.seed(122)
+data <- diamonds[sample(dim(diamonds)[1], 500), ]
+
+#wrangling
+cat_data <- data %>% 
+  mutate(length = x, width = y, depth_percent = depth, depth = z, price = log(price),
+         cut = as.character(cut), color = as.character(color), 
+         clarity = as.character(clarity)) %>% 
+  filter(depth != 0) %>% 
+  select(-x, -y, -z)
+
+ggpairs(dplyr::select(cat_data, length, width, depth, carat, table, depth_percent, price))
+```
+
+## Response variable: `price`
+
+```{r}
+#non transformed
+non_transformed <- ggplot(data = data, aes(x = price)) +
+  geom_density(fill="blue") +
+  ggtitle("Distribution of price", subtitle = "gaussian kernel, bw = nrd")
+
+# transformed
+transformed <- ggplot(data = cat_data, aes(x = price)) +
+  geom_density(kernel = "rectangular", bw = "sj", fill="red") +
+  ggtitle("Distribution of log(price)", subtitle = "rectangular kernel, SJ bandwidth") +
+  labs(x = "log(price)")
+```
+
+```{r, echo=FALSE}
+grid.arrange(non_transformed, transformed, ncol = 2)
+```
+
+## Spearman's test for correlation on `carat` vs. `log(price)`
+
+
+```{r, echo = F}
+ggplot(data = cat_data, aes(x = carat, y = price)) +
+  geom_point() +
+  ggtitle("log(price) vs. carat") +
+  ylab("log(price)") 
+```
+
+```{r, include=FALSE}
+cor.test(x = cat_data$carat, y = cat_data$price, data = cat_data, method = "spearman")
+```
+
+
+## OLS model: forward stepwise regression
+```{r, echo=FALSE}
+cat_and_quant_lm <- lm(price ~ carat + depth + table + length + 
+                         width + depth_percent
+                       + color + clarity + cut, data = cat_data)
+stepwise_output <- ols_step_forward_p(cat_and_quant_lm)
+stepwise_predictors <- stepwise_output$predictors
+stepwise_adjr <- round(stepwise_output$adjr, 3) # rounding adjr
+stepwise_aic <- round(stepwise_output$aic, 3)
+steps <- c(1, 2, 3, 4, 5, 6, 7)
+stepwise_df <- data.frame(cbind(steps, stepwise_predictors, stepwise_adjr, stepwise_aic))
+colnames(stepwise_df) <- c("Step", "Predictors", "\\(R^2_\\text{adj.}\\)", "AIC")
+
+table_stepwise <- knitr::kable(stepwise_df, format = "html", booktabs = TRUE, escape = FALSE)%>% 
+  kableExtra::kable_styling(font_size = 18, position = "center", row_label_position = "c", full_width = F) %>%
+  add_header_above(c("Table 1: Stepwise regression results" = 4))
+
+table_stepwise
+```
+- Note that forward stepwise regression excluded `depth_percent` and `table`.
+
+## OLS model: final model summary
+
+```{r, echo=FALSE}
+final_lm <- lm(price ~ width + clarity + color + carat + depth + 
+                 length, data = cat_data)
+
+summary_final_lm <- summary(final_lm)
+
+# get the coefficients
+final_lm_coeffs <- data.frame(summary_final_lm$coefficients)
+
+# get the names of the predictors
+predictors_final_lm <- rownames(final_lm_coeffs)
+
+# get the r-squared adjusted
+final_lm_adjr <- summary_final_lm$adj.r.squared
+
+# make the final df
+final_lm_df <- cbind(predictors_final_lm, final_lm_coeffs)
+
+final_lm_df <- select(final_lm_df, predictors_final_lm, Estimate, Pr...t..) 
+
+colnames(final_lm_df) <- c("Predictors", "Estimate", "P.value")
+
+# final_lm_df <- mutate(final_lm_df, indicator = ifelse(P.value < 0.0001, 1, 0))
+
+final_lm_df <- mutate(final_lm_df, indicator = ifelse(P.value < 0.0001, "< 0.0001", "6"))
+final_lm_df[1,4] <- round(0.5915609, 5)
+final_lm_df[2,4] <- round(0.0131907, 5)
+final_lm_df[10,4] <- round(0.3061189, 5)
+final_lm_df[11,4] <- round(0.0003385, 5)
+
+final_lm_df <- final_lm_df %>% select(-P.value) 
+
+colnames(final_lm_df) <- c("Predictors", "Estimate", "P-value")
+
+top_final_lm_df <- final_lm_df[0:9, ]
+bottom_final_lm_df <- final_lm_df[10:18, ]
+whole_df <- cbind(top_final_lm_df, bottom_final_lm_df)
+
+# making table for kable
+table_final_lm <- knitr::kable(whole_df, format = "html", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 14, position = "center", row_label_position = "c") %>% 
+  add_header_above(c("log(price) ~ width + clarity + color + carat + depth + length" = 6)) %>% 
+  add_header_above(c("Table 2: OLS model summary results" = 6)) %>% 
+  column_spec(column = 3, border_right = TRUE)
+
+# display table
+table_final_lm 
+```
+$R^2_\text{adj} = 0.983$
+
+## OLS or JHM?  Visually examine OLS residuals for normality
+
+```{r, include = FALSE}
+residuals <- final_lm$residuals
+residuals <- as.data.frame(residuals)
+colnames(residuals) <- c("residuals")
+residual_model_plot <- ggplot(data = residuals, aes(x = residuals)) +
+  geom_density(fill = "orange") +
+  ggtitle("Distribution of OLS residuals")
+```
+
+```{r, echo = FALSE}
+residual_model_plot
+```
+
+## OLS or JHM?  Test OLS residuals for normality (KS)
+
+```{r, warning = FALSE, include=FALSE}
+ks.test(x = residuals$residuals, y = pnorm, alternative = c("two.sided"))
+```
+```{r, include = F}
+norm_cdf <- data.frame(cbind(c(seq(from = min(residuals$residuals), to = max(residuals$residuals), by = 0.01)), pnorm(seq(from = min(residuals$residuals), to = max(residuals$residuals), by = 0.01), mean = mean(residuals$residuals), sd = sd(residuals$residuals))))
+
+ecdf_plot <- ggplot() +
+  geom_point(inherit.aes = F, data = norm_cdf, aes(x = X1, y = X2), size = 1, color = "red") + 
+  stat_ecdf(data = residuals, aes(x = residuals)) + 
+  scale_x_continuous(name = "residuals") +
+  scale_y_continuous(name = "Empirical CDF") +
+  ggtitle("Empirical CDF of OLS residuals", subtitle = "red = normal CDF") +
+  labs(caption = "plot 4")
+```
+
+```{r, echo = FALSE}
+ecdf_plot
+```
+
+
+## Building a JHM model
+
+```{r, echo=FALSE}
+rfit_final <- rfit(price ~ width + clarity + color + carat + depth 
+                   + length, data = cat_data)
+
+
+# data.frame(summary(rfit_final)$coefficients) %>% select(p.value)
+
+summary_rfit_lm <- summary(rfit_final)
+
+# get the coefficients
+rfit_lm_coeffs <- data.frame(summary_rfit_lm$coefficients)
+
+# get the names of the predictors
+predictors_rfit_lm <- rownames(rfit_lm_coeffs)
+
+# get the r-squared adjusted
+rfit_lm_adjr <- summary_rfit_lm$R2
+
+# make the final df
+rfit_lm_df <- cbind(predictors_rfit_lm, rfit_lm_coeffs)
+
+rfit_lm_df <- select(rfit_lm_df, predictors_rfit_lm, Estimate, p.value) 
+
+colnames(rfit_lm_df) <- c("Predictors", "Estimate", "P.value")
+
+rfit_lm_df <- mutate(rfit_lm_df, indicator = ifelse(P.value < 0.0001, 1, 0))
+
+rfit_lm_df <- mutate(rfit_lm_df, indicator = ifelse(P.value < 0.0001, "< 0.0001", "FALSE"))
+
+rfit_lm_df[1,4] <- 0.93893
+rfit_lm_df[2,4] <- 0.01848
+rfit_lm_df[10,4] <- 0.29299
+rfit_lm_df[11,4] <- 0.00054
+
+rfit_lm_df <- rfit_lm_df %>% select(-P.value) 
+
+colnames(rfit_lm_df) <- c("Predictors", "Estimate", "P-value")
+
+top_rfit_lm_df <- rfit_lm_df[0:9, ]
+bottom_rfit_lm_df <- rfit_lm_df[10:18, ]
+rfit_whole_df <- cbind(top_rfit_lm_df, bottom_rfit_lm_df)
+
+# making table for kable
+table_rfit_lm <- knitr::kable(rfit_whole_df, format = "html", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 14, position = "center", row_label_position = "c") %>% 
+  add_header_above(c("log(price) ~ width + clarity + color + carat + depth + length" = 6)) %>%
+  add_header_above(c("Table 3: JHM model summary results" = 6)) %>% 
+  column_spec(column = 3, border_right = TRUE)
+
+table_rfit_lm
+```
+$R^2_\text{adj} = 0.9811$
+
+## Plotting JHM model - quantitative predictors
+
+```{r, include = FALSE}
+#rfit_final
+mean_y = mean(cat_data$price)
+mean_width = mean(cat_data$width)
+mean_carat = mean(cat_data$carat)
+mean_depth = mean(cat_data$depth)
+mean_length = mean(cat_data$length)
+coef_width = summary(rfit_final)$coefficients[2]
+coef10_width = mean_y - coef_width*mean_width
+coef2_width = summary(rfit_final)$coefficients[2]
+coef20_width = mean_y - coef2_width*mean_carat
+coef3_width = summary(rfit_final)$coefficients[2]
+coef30_width = mean_y - coef3_width*mean_depth
+coef4_width = summary(rfit_final)$coefficients[2]
+coef40_width = mean_y - coef4_width*mean_length
+rfit_plot1 <- ggplot(data = cat_data, aes(x = width, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef10_width, slope = coef_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. width") +
+  ylab("log(price)")
+
+rfit_plot2 = ggplot(data = cat_data, aes(x = carat, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef20_width, slope = coef2_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. carat") +
+  ylab("log(price)")
+
+
+rfit_plot3 <- ggplot(data = cat_data, aes(x = depth, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef30_width, slope = coef3_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. depth") +
+  ylab("log(price)")
+
+
+rfit_plot4 <- ggplot(data = cat_data, aes(x = length, y = price)) + 
+  geom_point() + 
+  geom_abline(intercept = coef40_width, slope = coef4_width, color = "red", size = 1) + 
+   geom_hline(yintercept = mean_y, color = "blue", size = .5, lty = 2) +
+  ggtitle("log(price) vs. length") +
+  ylab("log(price)")
+```
+
+```{r, echo = FALSE}
+grid.arrange(rfit_plot1, rfit_plot2, rfit_plot3, rfit_plot4)
+```
+
+## Plotting JHM model - categorical predictors
+
+```{r, include = F}
+#ploting categorical variables
+#color
+coefs_color <- rfit_final$coefficients[10:15]
+coefs_color_df <- as.data.frame(coefs_color)
+colnames(coefs_color_df) <- c("coefficients_vals")
+color_options <- c("colorE", "colorF", "colorG", "colorH", "colorI", "colorJ")
+color_options <- as.data.frame(color_options)
+color_df <- cbind(color_options, coefs_color_df)
+
+color_plot <- ggplot(data = color_df,
+                     aes(x = color_options, y = coefficients_vals)) +
+  geom_point() +
+  ggtitle("Coefficients for each diamond's color", subtitle = "dashed line = baseline indicator level") +
+  xlab("color") +
+  ylab("coefficient") +
+  ylim(-0.5, 0.1) +
+  geom_hline(yintercept = 0, lty = 2, color = "blue") +
+  theme(axis.text.x = element_text(angle = 90))
+
+#clarity plot
+coefs_clarity <- rfit_final$coefficients[3:9]
+coefs_clarity_df<- as.data.frame(coefs_clarity)
+colnames(coefs_clarity_df) <- c("coefficients_vals_cl")
+clarity_options <- c("clarityIF", "claritySI1", "claritySI2", "clarityVS1", "clarityVS2", "clarityVVS1", "carityVVS2")
+clarity_options <- as.data.frame(clarity_options)
+clarity_df <- cbind(clarity_options, coefs_clarity_df)
+
+clarity_plot <- ggplot(data = clarity_df,
+                     aes(x = clarity_options, y = coefs_clarity)) +
+  geom_point() +
+  ggtitle("Coefficients for each diamond's clarity", subtitle = "dashed line = baseline indicator level") +
+  xlab("clarity") +
+  ylab("coefficient") +
+  ylim(-0.1, 1.1) +
+  geom_hline(yintercept = 0, lty = 2, color = "blue") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+```{r, Echo = FALSE}
+grid.arrange(color_plot, clarity_plot, ncol = 2)
+```
+
+
+## GAM: smoother or SLR for quantitative predictors? 
+
+```{r}
+#function for calculating adjusted r-squared for gam
+gam_adjusted <- function(model){
+  rsq_gam = 1 - model$deviance/model$null.deviance
+  adjrsq_gam = 1 - (1 - rsq_gam)*(model$df.null/model$df.residual)
+  return(adjrsq_gam)
+}
+```
+
+- For each quantitative predictor, we created two models - a GAM with a s-spline smoother, and a SLR - and compared their AICs. 
+```{r, warning=F}
+#WIDTH
+smoothing_width <- gam(price ~ s(width, df = 6), data = cat_data)
+slr_width <- lm(price ~ width, data = cat_data)
+#gam_adjusted(smoothing_width)
+
+#LENGTH
+smoothing_length <- gam(price ~ s(length, df = 6), data = cat_data)
+slr_length <- lm(price ~ length, data = cat_data)
+#gam_adjusted(smoothing_length)
+
+#CARAT
+smoothing_carat <- gam(price ~ s(carat, df = 6), data = cat_data)
+slr_carat <- lm(price ~ carat, data = cat_data)
+#gam_adjusted(smoothing_carat)
+
+#DEPTH
+smoothing_depth <- gam(price ~ s(depth, df = 6), data = cat_data)
+slr_depth <- lm(price ~ depth, data = cat_data)
+#gam_adjusted(smoothing_depth)
+```
+
+```{r, include = F}
+adjrsquared_slr <- c(0.931, 0.929, 0.856, 0.870)
+adjrsquared_gam <- c(0.943, 0.942, 0.941, 0.935)
+predictors <- c("width", "length", "carat", "depth")
+#create data table
+decision_table <- cbind(predictors, adjrsquared_slr, adjrsquared_gam)
+
+colnames(decision_table) <- c("Predictor", "SLR", "Smooth")
+
+decision_table <- knitr::kable(decision_table, "html", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 20, position = "center", row_label_position = "c", full_width = F) %>% 
+  add_header_above(c("Table 4: SLR vs. smooth \\(R^2_\\text{adj}\\)" = 3))
+```
+
+```{r}
+decision_table
+```
+
+* Note: $R^2_\text{adj}$ for smoothing spline was higher for all quantitative predictors.
+
+## GAM: choosing the best model
+
+```{r, include = F, warning = F}
+#with all quantitative predictors 
+gam_full <- gam(price ~ clarity + color + 
+                 s(length, df = 6) + 
+                 s(width, df = 6) + 
+                 s(depth, df = 6) + 
+                 s(carat, df = 6), 
+               data = cat_data)
+
+gam_mod2 <- gam(price ~ clarity + color + length + width +
+                  s(carat, df = 6) +
+                  s(depth, df = 6), 
+                data = cat_data)
+
+gam_mod3 <- gam(price ~ clarity + color + depth + carat +
+                  s(width, df = 6),
+                data = cat_data)
+
+gam_mod4 <- gam(price ~ clarity + color + depth + carat + width,
+                data = cat_data)
+
+gam_mod5 <- gam(price ~ clarity + color + depth + carat +
+                 s(length, df = 6) + 
+                 s(width, df = 6),
+               data = cat_data)
+
+AIC(gam_full, gam_mod2, gam_mod3, gam_mod4, gam_mod5)
+```
+
+```{r, include=FALSE}
+aics <- c(-649.94, -612.54, -596.29, -545.24, -652.97)
+modelNames <- c("color + clarity + s(length) + s(width) + s(depth) + s(carat)", 
+                "color + clarity + length + width + s(depth) + s(carat)", 
+                "color + clarity + depth + carat + s(width)", 
+                "color + clarity + depth + carat + width + length", 
+                "color + clarity + depth + carat + s(width) + s(length)")
+
+
+#create df
+choose_gam_table <- data.frame(cbind(modelNames, aics))
+colnames(choose_gam_table) <- c("Model", "AIC")
+
+choose_gam_table <- knitr::kable(choose_gam_table, "html", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 18, position = "center", row_label_position = "c", full_width = F) %>% 
+  add_header_above(c("Table 5: Comparison of AIC between GAM models" = 2))
+```
+
+```{r}
+choose_gam_table
+```
+- The model with predictors `clarity + color + depth + carat + s(width) + s(length)` had the lowest AIC (-652).
+
+## GAM: plotting chosen model
+
+- Note: red = smoother; gold = GAM
+```{r, include = F}
+#plot gam 6
+gam_5_c = predict(gam_mod5, type = "terms") 
+gam_5_y = fitted(gam_mod5) 
+diamonds_subset = select(.data = cat_data, clarity, color, depth, carat, length, width, price)
+gam_5_plots = cbind(diamonds_subset, gam_5_c, gam_5_y)
+cnn = c(colnames(diamonds_subset),"clarity_pred", "color_pred", "depth_pred", "carat_pred", "length_pred", "width_pred", "price_pred")
+price_m = mean(diamonds_subset$price)
+colnames(gam_5_plots) = cnn
+#length plot
+plotl5 <- ggplot(data = cat_data, aes(x = length, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = length, y = length_pred + price_m)) +
+  ggtitle("log(price) vs. length") +
+  ylab("log(price)") 
+
+#width plot
+plotw5 <- ggplot(data = cat_data, aes(x = width, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = width, y = width_pred + price_m)) +
+  ggtitle("log(price) vs. width") +
+  ylab("log(price)") 
+
+#depth plot
+plotd5 <- ggplot(data = cat_data, aes(x = depth, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = depth, y = depth_pred + price_m)) +
+  ggtitle("log(price) vs. depth") +
+  ylab("log(price)")
+
+#carat plot
+plotc5 <- ggplot(data = cat_data, aes(x = carat, y = price)) +
+  geom_point() +
+  geom_hline(yintercept = price_m, linetype = 2, color = "blue") +
+  geom_smooth(color = "red", size = 1.5) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = carat, y = carat_pred + price_m)) +
+  ggtitle("log(price) vs. carat") +
+  ylab("log(price)") 
+
+#resids
+plotr5 <- ggplot() + 
+  geom_point(aes(x=gam_mod5$fitted.values, y=gam_mod5$residuals)) +
+  labs(x = "log(price)", y = "GAM Residuals") +
+  ggtitle("Residuals of gam model")
+```
+
+```{r, echo = F, warning = F, comment = F, message = F}
+grid.arrange(plotl5, plotw5, plotd5, plotc5, plotr5, ncol = 3)
+```
+
+## GAM: explaining the roles of `carat` and `width` in the model
+
+```{r, include = F}
+mod <- cat_data$price-(mean(cat_data$price) + predict(gam_mod5, type = "terms")[,5] + predict(gam_mod5, type = "terms")[,6] + 0.69298443*cat_data$depth)
+model_resids_plot <- ggplot() +
+  geom_point(aes(x = cat_data$carat, y = mod)) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = carat, y = carat_pred - (1/3)*price_m)) +
+  ggtitle("Error of depth, s(width) and s(length)", subtitle = "as explained by carat") +
+  ylab("Y - Y-bar + B(depth) + s(width) + s(length)") +
+  xlab("carat")
+```
+
+```{r, include = F}
+mod_w <- cat_data$price-(mean(cat_data$price) + predict(gam_mod5, type = "terms")[,5] + -0.25247515*cat_data$carat + 0.69298443*cat_data$depth)
+model_resids_plot_w <- ggplot() +
+  geom_point(aes(x = cat_data$width, y = mod_w)) +
+  geom_line(inherit.aes = F, 
+            size = 1.5, color = "gold",
+            data = gam_5_plots, 
+            aes(x = width, y = width_pred - (1/3)*price_m)) +
+  ggtitle("Error of depth, carat, and s(length)", subtitle = "as explained by width") +
+  ylab("Y - Y-bar + B(depth) + s(length) + B(carat)") +
+  xlab("width")
+```
+
+```{r, echo = FALSE}
+grid.arrange(model_resids_plot, model_resids_plot_w, ncol = 2)
+```
+
+##  Examining residuals: all attempted models
+
+```{r, include = F}
+jhm_resids <- as.data.frame(rfit_final$residuals)
+colnames(jhm_resids) <- c("resids")
+
+y_bar_model <- lm(price ~ 1, data = cat_data)
+y_bar_resids <- as.data.frame(y_bar_model$residuals)
+colnames(y_bar_resids) <- c("resids")
+
+gam_resids <- as.data.frame(gam_mod5$residuals)
+colnames(gam_resids) <- c("resids")
+
+ols_resids <- as.data.frame(final_lm$residuals)
+colnames(ols_resids) <- c("resids")
+
+#oneplot
+all_resids_plot <- ggplot() +
+  stat_ecdf(inherit.aes = F,
+            data = jhm_resids, aes(x = resids, color = "blue"), geom = "step", position = "identity") +
+  stat_ecdf(inherit.aes = F,
+            data = y_bar_resids, aes(x = resids, color = "red"), geom = "step", position = "identity") +
+  stat_ecdf(inherit.aes = F,
+            data = gam_resids, aes(x = resids, color = "green"), geom = "step", position = "identity") +
+  stat_ecdf(inherit.aes = F,
+            data = ols_resids, aes(x = resids, color = "orange"), geom = "step", position = "identity") +
+  scale_x_continuous(name = "residuals") +
+  xlim(-0.5, 0.5) +
+  scale_y_continuous(name = "Empirical CDF") +
+  ggtitle("Comparing GAM, JHM, OLS & null-model residuals") +
+  scale_color_identity(name = "Model",
+                          breaks = c("blue", "red", "green", "orange"),
+                          labels = c("JHM", "Null", "GAM", "OLS"),
+                          guide = "legend") +
+  xlab("residuals")
+```
+
+```{r, warning = FALSE, echo = FALSE, message = F, comment = F}
+all_resids_plot
+```
+
+
+## Assessing model fit: cross-validation
+
+```{r, include = F}
+#Fit statistics for OLS
+fit_ols = function(model) {
+  yy = model$residuals + model$fitted.values
+  rsq = 1 - sum(model$residuals^2)/sum((yy - mean(yy))^2)
+  nn = length(yy)
+  adjrsq = 1 - (1 - rsq)*((nn - 1)/(nn - length(model$coefficients)))
+  propL1 = 1 - sum(abs(model$residuals))/sum(abs(yy - mean(yy)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#Fit statistics for JHM
+fit_jhm = function(model) {
+  rsq = 1 - sum(model$residuals^2)/sum((model$y - mean(model$y))^2)
+  nn = length(model$y)
+  adjrsq = 1 - (1 - rsq)*((nn - 1)/(nn - length(model$coefficients)))
+  propL1 = 1 - sum(abs(model$residuals))/sum(abs(model$y - mean(model$y)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#Fit statistics for GAM
+fit_gam = function(model) {
+  rsq = 1 - model$deviance/model$null.deviance
+  adjrsq = 1 - (1 - rsq)*(model$df.null/model$df.residual)
+  propL1 = 1 - sum(abs(model$residuals))/sum(abs(model$y - mean(model$y)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#General fit statistics
+fit_gen = function(y, res, df){
+  rsq = 1 - sum(res^2)/sum((y - mean(y))^2)
+  nn = length(y)
+  adjrsq = 1 - (1 - rsq)*((nn - 1)/(nn - df))
+  propL1 = 1 - sum(abs(res))/sum(abs(y - mean(y)))
+  return(cbind(rsq = rsq, adjrsq = adjrsq, propL1 = propL1))
+}
+#My cross-validation function for this project
+cv_rmc = function(dat, ols_mod, jhm_mod, gam_mod, k = 5, m = 10){
+  #(Some) error checking
+  if(class(ols_mod) != "lm") stop('ols_mod should come from the lm() function')
+  if(class(jhm_mod) != "rfit") stop('jhm_mod should come from the rfit() function')
+  if(class(gam_mod)[1] != "Gam") stop('gam_mod should come from the gam() function')
+  #Create model call character strings with subsetted data; uses stringr f()s
+  dat.name = paste0("data = ", deparse(substitute(dat)))
+  ols_call = capture.output(ols_mod$call)
+  ols_call = str_replace(ols_call, dat.name, "data = dat[-part[[i]], ]")
+  jhm_call = capture.output(jhm_mod$call)
+  jhm_call = str_replace(jhm_call, dat.name, "data = dat[-part[[i]], ]")
+  gam_call = paste(str_trim(capture.output(gam_mod$call)), sep="", collapse="")
+  gam_call = str_replace(gam_call, dat.name, "data = dat[-part[[i]], ]")  
+  #Set up objects
+  ols_fit = matrix(nrow = m, ncol = 3)
+  jhm_fit = ols_fit; gam_fit = ols_fit
+  yy = jhm_mod$y
+  nn = dim(as.data.frame(dat))[1]
+  oos_lmres = vector(length = nn)
+  oos_jhres = oos_lmres; oos_gares = oos_lmres
+  df_ols = length(ols_mod$coefficients)
+  df_jhm = length(jhm_mod$coefficients)
+  df_gam = nn - gam_mod$df.residual
+  #Repeat k-fold cross-validation m times
+  for(j in 1:m) {
+    #Split data into k equal-ish parts, with random indices
+    part = suppressWarnings(split(sample(nn), 1:k))
+    #Execute model calls for all k folds; %*% is matrix multiplication
+    for(i in 1:k){
+      lm_mod = eval(parse(text = ols_call))
+      5
+      
+      pred = predict(object = lm_mod, newdata = dat[part[[i]],])
+      oos_lmres[part[[i]]] = yy[part[[i]]] - pred
+      jh_mod = eval(parse(text = jhm_call))
+      subdat = select(.data = dat, colnames(jh_mod$x)[-1])[part[[i]],]
+      subdat = cbind(1, as.matrix.data.frame(subdat))
+      pred = subdat %*% jh_mod$coefficients
+      oos_jhres[part[[i]]] = yy[part[[i]]] - pred
+      ga_mod = eval(parse(text = gam_call))
+      pred = predict(object = ga_mod, newdata = dat[part[[i]],])
+      oos_gares[part[[i]]] = yy[part[[i]]] - pred
+    }
+    ols_fit[j, ] = fit_gen(y = yy, res = oos_lmres, df = df_ols)
+    jhm_fit[j, ] = fit_gen(y = yy, res = oos_jhres, df = df_jhm)
+    gam_fit[j, ] = fit_gen(y = yy, res = oos_gares, df = df_gam)
+}
+#Manage output -- average fit statistics
+  outtie = rbind(colMeans(ols_fit), colMeans(jhm_fit), colMeans(gam_fit))
+  colnames(outtie) = paste0("cv.", colnames(fit_ols(lm_mod)))
+  row.names(outtie) = c("OLS", "JHM", "GAM")
+  return(outtie)
+}
+```
+
+```{r, echo = F}
+#non cross validation values - i.e. evaluated on same data
+fit_final = rbind(fit_ols(final_lm), fit_jhm(rfit_final), fit_gam(gam_mod4))
+rownames(fit_final) = c("OLS", "JHM", "GAM")
+```
+
+```{r, include = F}
+#create temp dataset to pass into dat
+cat_data_temp <- cat_data %>% 
+  mutate(clarityIF = ifelse(clarity == "IF", 1, 0),
+         claritySI1 = ifelse(clarity == "SI1", 1, 0),
+         claritySI2 = ifelse(clarity == "SI2", 1, 0),
+         clarityVS1 = ifelse(clarity == "VS1", 1, 0),
+         clarityVS2 = ifelse(clarity == "VS2", 1, 0),
+         clarityVVS1 = ifelse(clarity == "VVS1", 1, 0),
+         clarityVVS2 = ifelse(clarity == "VVS2", 1, 0)) %>% 
+  mutate(colorE = ifelse(color == "E", 1, 0),
+         colorF = ifelse(color == "F", 1, 0),
+         colorG = ifelse(color == "G", 1, 0),
+         colorH = ifelse(color == "H", 1, 0),
+         colorI = ifelse(color == "I", 1, 0),
+         colorJ = ifelse(color == "J", 1, 0)) %>% 
+  select(-color, -clarity)
+
+#build new jhm model using temp dataset
+rfit_final_temp <- rfit(price ~ width + carat + depth + length + clarityIF +
+                          claritySI1 + claritySI2 + clarityVS1 + clarityVS2 +
+                          clarityVVS1 + clarityVVS2 + colorE + colorF + colorG 
+                        + colorH + colorI + colorJ, 
+                   data = cat_data_temp)
+
+ols_final_temp <- lm(price ~ width + carat + depth + length + clarityIF +
+                          claritySI1 + claritySI2 + clarityVS1 + clarityVS2 +
+                          clarityVVS1 + clarityVVS2 + colorE + colorF + colorG 
+                        + colorH + colorI + colorJ, 
+                   data = cat_data_temp)
+
+gam_mod5_temp <- gam_mod5 <- gam(price ~ clarityIF + claritySI1 + claritySI2 +
+                                   clarityVS1 + clarityVS2 + 
+                                   clarityVVS1 + clarityVVS2 + 
+                                   colorE + colorF + colorG 
+                                 + colorH + colorI + colorJ + 
+                                   depth + carat +
+                 s(length, df = 6) + 
+                 s(width, df = 6),
+               data = cat_data_temp)
+```
+
+```{r, echo = F, warning=F}
+#cross validation results
+out10 <- cv_rmc(dat = cat_data_temp, ols_mod = ols_final_temp, jhm_mod = rfit_final_temp, gam_mod = gam_mod5_temp)
+```
+
+```{r}
+non_cv_res <- fit_final
+cv_res <- out10
+model_fit_df <- cbind(non_cv_res, cv_res)
+model_fit_df <- round(model_fit_df, 4)
+
+types <- c("OLS", "JHM", "GAM")
+model_fit_df <- cbind(types, model_fit_df)
+
+model_fit_df <- data.frame(model_fit_df)
+model_fit_df <- model_fit_df[ , -1]
+
+colnames(model_fit_df) <- c("\\(R^2\\)", 
+                            "\\(R^2_\\text{adj}\\)", 
+                            "\\(L1_{\\text{prop}}\\)",
+                            "\\(R^2\\)", 
+                            "\\(R^2_\\text{adj}\\)", 
+                            "\\(L1_{\\text{prop}}\\)")
+
+# making table for kable
+table_model_fit <- knitr::kable(model_fit_df, format = "html", booktabs = TRUE, escape = FALSE) %>% 
+  kableExtra::kable_styling(font_size = 16, position = "center", row_label_position = "c", full_width = FALSE) %>% 
+  add_header_above(c("Regular approach" = 4, "Cross-validation approach" = 3)) %>% 
+  add_header_above(c("Table 6: Results from cross-validation" = 7)) %>% 
+  column_spec(column = 4, border_right = TRUE)
+# display table
+table_model_fit
+```
+
+- GAM outperforms the other models (look at cross-validation)
+- $R^2$ values: OLS fails to explain 1.84% of the variability, while GAM fails to explain 1.53% of the variability 
+- Using the GAM model results in a 16% decrease in unexplained variability (relative to OLS). 
+
+## Limitations
+
+- Multicollinearity between `carat`, `length`, `width`, and `depth`.
+- We don't know what year this dataset is from
+  - If we did, we could use our model to predict diamond price and adjust for inflation.
+
+## Conclusions
+
+- **Recall:** How can we predict diamond price? 
+- **Best model:** utilizes a GAM 
+  - Predictors: `clarity + color + depth + carat + s(width) + s(length)`
